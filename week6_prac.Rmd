@@ -1,0 +1,327 @@
+------------------------------------------------------------------------
+
+```{r}
+#first library a few packages that we will use during the practical
+#note you may need to install them first...
+install.packages('spatstat')
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(tmap)
+library(sf)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+```
+```{r}
+##First, get the London Borough Boundaries
+LondonBoroughs <- st_read(here::here("Data", "statistical-gis-boundaries-london", "ESRI", "London_Borough_Excluding_MHW.shp"))
+LondonBoroughs
+```
+
+```{r}
+#use this to read in directly.
+#LondonBoroughs <- st_read("https://opendata.arcgis.com/datasets/8edafbe3276d4b56aec60991cbddda50_4.geojson")
+```
+```{r}
+##filter code of London and standardize crs
+library(stringr)
+BoroughMap <- LondonBoroughs %>%
+  dplyr::filter(str_detect(GSS_CODE, "^E09"))%>%
+  st_transform(., 27700)
+
+qtm(BoroughMap)
+summary(BoroughMap)
+```
+
+##Now get the location of all Blue Plaques in the City
+```{r}
+
+BluePlaques <- st_read("https://s3.eu-west-2.amazonaws.com/openplaques/open-plaques-london-2018-04-08.geojson")%>%
+  st_transform(.,27700)
+
+summary(BluePlaques)
+```
+#plot the blue plaques in the city
+```{r}
+
+tmap_mode("plot")
+tm_shape(BoroughMap) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaques) +
+  tm_dots(col = "blue")
+```
+#remove duplicates rows
+```{r}
+
+library(tidyverse)
+
+library(sf)
+BluePlaques <- distinct(BluePlaques)
+```
+
+
+###clip data by boroughmap
+```{r}
+BluePlaquesSub <- BluePlaques[BoroughMap,]
+###he second operator is blank , , - this controls which attributes are kept
+#裁剪数据
+###或者intersect_indices <-st_intersects(BoroughMap, BluePlaques)
+tmap_mode("plot")
+tm_shape(BoroughMap) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaquesSub) +
+  tm_dots(col = "blue")
+```
+##???why can't plot?what data type is indices?
+```{r}
+intersect_indices <-st_intersects(BoroughMap, BluePlaques)
+tmap_mode("plot")
+tm_shape(BoroughMap) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(intersect_indices) +
+  tm_dots(col = "blue")
+```
+#extract the borough
+```{r}
+
+
+# select by attribute
+Harrow <- BoroughMap %>%
+  filter(., NAME=="Harrow")
+
+#Check to see that the correct borough has been pulled out
+tm_shape(Harrow) +
+  tm_polygons(col = NA, alpha = 0.5)
+```
+##clip data to a borough
+##??st_intersect output what?
+```{r}
+BluePlaquesSub <- st_transform(BluePlaquesSub,27700)
+LondonBoroughs <- st_transform(LondonBoroughs,27700)
+BluePlaquesSub1 <- st_intersects(LondonBoroughs,BluePlaquesSub)
+BluePlaquesSub2 <- BluePlaquesSub[Harrow,]
+```
+
+
+```{r}
+tmap_mode=("plot")
+tm_shape(Harrow)+
+  tm_polygons(col=NA,alpha=0.5)+
+tm_shape(BluePlaquesSub2)+
+  tm_dots(col="blue",size=0.05)
+```
+#now set an observation window as the borough boundary
+```{r}
+
+window <- as.owin(Harrow)
+plot(window)
+```
+
+#create a sp object
+```{r}
+
+BluePlaquesSub<- BluePlaquesSub2 %>%
+  as(., 'Spatial')
+#create a ppp object
+BluePlaquesSub.ppp <- ppp(x=BluePlaquesSub@coords[,1],
+                          y=BluePlaquesSub@coords[,2],
+                          window=window)
+BluePlaquesSub.ppp %>%
+  plot(.,pch=16,cex=0.5, 
+       main="Blue Plaques Harrow")
+```
+#try
+```{r}
+BluePlaquesSub@coords[,1]
+```
+##Kernel Density Estimation核密度
+```{r}
+BluePlaquesSub.ppp %>%
+  density(., sigma=500) %>%
+  plot()
+###sigma is diameter
+```
+
+```{r}
+#First plot the points
+plot(BluePlaquesSub.ppp,
+     pch=16,
+     cex=0.5, 
+     main="Blue Plaques in Harrow")
+
+#now count the points in that fall in a 6 x 6
+#grid overlaid across the windowBluePlaquesSub.ppp2<-BluePlaquesSub.ppp %>%
+BluePlaquesSub.ppp %>%
+  quadratcount(.,nx = 6, ny = 6)%>%
+    plot(., add=T, col="red")
+```
+
+```{r}
+#run the quadrat count
+Qcount <- BluePlaquesSub.ppp %>%
+  quadratcount(.,nx = 6, ny = 6) %>%
+  as.data.frame() %>%
+  dplyr::count(Var1=Freq)%>% ###group by freq and count
+  dplyr::rename(Freqquadratcount=n)
+Qcount %>% 
+  summarise_all(class)
+```
+
+```{r}
+Qcount1 <- BluePlaquesSub.ppp %>%
+  quadratcount(.,nx = 6, ny = 6) %>%
+  as.data.frame()
+```
+
+```{r}
+sums <- Qcount %>%
+  #calculate the total blue plaques (Var * Freq)
+  mutate(total = Var1 * Freqquadratcount) %>%
+  dplyr::summarise(across(everything(), sum))%>%
+  dplyr::select(-Var1) 
+
+lambda <- Qcount %>%
+  mutate(total = Var1 * Freqquadratcount) %>%  ## 计算每个样本的Var1和Freqquadratcount的乘积，并创建新列total
+  dplyr::summarise(across(everything(), sum)) %>%  ## 对所有列求和，每列变成其所有值的总和
+  mutate(lambda = total / Freqquadratcount) %>%  ## 使用总和total除以Freqquadratcount列的值来计算lambda
+  dplyr::select(lambda) %>%  ## 选择lambda列
+  pull(lambda)  ## 将lambda列的值提取出来，转换成一个向量
+```
+
+```{r}
+QCountTable <- Qcount %>%
+  mutate(Pr=((lambda^Var1)*exp(-lambda))/factorial(Var1)) %>%  ## 根据泊松分布计算Var1出现的概率Pr
+  mutate(Expected= (round(Pr * sums$Freqquadratcount, 0)))  ## 计算预期计数并四舍五入到最接近的整数
+
+# 对观测点模式和预期点模式的频率分布进行比较
+plot(c(1,5),c(0,14), type="n",  ## 初始化一个空图形，设置x轴和y轴的范围
+xlab="Number of Blue Plaques (Red=Observed,Blue=Expected)",  ## 设置x轴标签
+     ylab="Frequency of Occurances")  ## 设置y轴标签
+points(QCountTable$Freqquadratcount,  ## 添加观测频率数据点（红色）
+       col="Red", 
+       type="o", 
+       lwd=3)
+points(QCountTable$Expected, col="Blue",  ## 添加预期频率数据点（蓝色）
+       type="o", 
+       lwd=3)
+```
+
+```{r}
+teststats <- quadrat.test(BluePlaquesSub.ppp, nx = 6, ny = 6)
+```
+
+```{r}
+plot(BluePlaquesSub.ppp,pch=16,cex=0.5, main="Blue Plaques in Harrow")
+plot(teststats, add=T, col = "red")
+```
+#conduct a Ripley’s K test on our data very simply with the spatstat package using the kest() function.
+#to
+```{r}
+K <- BluePlaquesSub.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+Kval <- as.data.frame(Kest(BluePlaquesSub.ppp, correction = "Ripley"))
+##当K大于小于实际值，说明在一定半径内相对集中
+```
+###DBSCAN
+```{r}
+##DBSCAN 要求您输入两个参数：1. Epsilon - 这是算法搜索聚类的半径 2.MinPts - 这是应被视为群集的最小点数
+
+#
+##根据前面的 Ripley K 分析结果，我们可以看到，我们的聚类半径约为 1200 米，图中最大的凸起位于 700 米左右。因此，700m 可能是一个很好的起点，我们将从搜索至少 4 个点的集群开始......
+install.packages('fpc')
+library(raster)
+library(fpc)
+#first check the coordinate reference system of the Harrow spatial polygon:
+st_geometry(BoroughMap)
+```
+
+```{r}
+#first extract the points from the spatial points data frame
+BluePlaquesSubPoints <- BluePlaquesSub %>%
+  coordinates(.) %>%
+  as.data.frame()  ## 从空间数据框 BluePlaquesSub 提取坐标并转换成数据框
+
+#now run the dbscan analysis
+db <- BluePlaquesSubPoints %>%
+  fpc::dbscan(.,eps = 700, MinPts = 4)
+
+#now plot the results
+plot(db, BluePlaquesSubPoints, main = "DBSCAN Output", frame = F)
+plot(BoroughMap$geometry, add=T)
+```
+??
+```{r}
+# used to find suitable eps value based on the knee in plot
+# k is no of nearest neighbours used, use min points
+install.packages('dbscan')
+library(dbscan)
+
+BluePlaquesSubPoints%>%
+  dbscan::kNNdistplot(.,k=4)
+##Next, these k-distances are plotted in an ascending order. The aim is to determine the “knee”, which corresponds to the optimal eps parameter.
+#接下来，按升序绘制这些 k 距离。目的是确定“拐点”，它对应于最佳 eps 参数。
+
+#A knee corresponds to a threshold where a sharp change occurs along the k-distance curve.
+#拐点对应于沿 k 距离曲线发生急剧变化的阈值。
+```
+#plot
+```{r}
+BluePlaquesSubPoints <- BluePlaquesSubPoints %>%
+  mutate(dbcluster=db$cluster)  ## 将DBSCAN聚类结果添加到数据框中
+
+chulls <- BluePlaquesSubPoints %>%
+  group_by(dbcluster) %>%
+  dplyr::mutate(hull = 1:n()) %>%
+  dplyr::mutate(hull = factor(hull, chull(coords.x1, coords.x2))) %>%
+  arrange(hull)  ## 对每个聚类计算凸包，并将其作为因子类型的新列添加到数据框中
+
+# chulls2 <- ddply(BluePlaquesSubPoints, .(dbcluster), 
+#                  function(df) df[chull(df$coords.x1, df$coords.x2), ])
+## 上述被注释的代码是另一种计算凸包的方法，使用了plyr包的ddply函数
+
+chulls <- chulls %>%
+  filter(dbcluster >= 1)  ## 从数据中过滤掉噪声点，即那些不属于任何聚类的点（通常dbcluster标记为0或-1）
+
+dbplot <- ggplot(data = BluePlaquesSubPoints, 
+                 aes(coords.x1, coords.x2, colour = dbcluster, fill = dbcluster))  ## 初始化ggplot对象，并设置绘图的美学属性
+
+# 添加点到图中
+dbplot <- dbplot + geom_point()  ## 使用geom_point添加散点图层
+
+# 现在添加凸包
+dbplot <- dbplot + geom_polygon(data = chulls, 
+                                aes(coords.x1, coords.x2, group = dbcluster), 
+                                alpha = 0.5)  ## 使用geom_polygon添加凸包图层，透明度设为0.5以便观察点
+
+# 最后绘制图形，设置坐标比例一致，并使用黑白主题
+dbplot + theme_bw() + coord_equal()  ## 应用黑白主题，并确保x和y轴具有相同的比例
+###add a basemap
+##First get the bbox in lat long for Harrow
+HarrowWGSbb <- Harrow %>%
+  st_transform(., 4326)%>%
+  st_bbox()
+library(OpenStreetMap)
+
+basemap <- OpenStreetMap::openmap(c(51.5549876,-0.4040502),c(51.6405356,-0.2671315),
+                         zoom=NULL,
+                         "osm")
+
+  # convert the basemap to British National Grid
+basemap_bng <- openproj(basemap, projection="+init=epsg:27700")
+#autoplot(basemap_bng) sometimes works
+autoplot.OpenStreetMap(basemap_bng)+ 
+  geom_point(data=BluePlaquesSubPoints, 
+             aes(coords.x1,coords.x2, 
+                 colour=dbcluster, 
+                 fill=dbcluster)) + 
+  geom_polygon(data = chulls, 
+               aes(coords.x1,coords.x2, 
+                   group=dbcluster,
+                   fill=dbcluster), 
+               alpha = 0.5)  
+```
+
